@@ -1,1 +1,0 @@
-Let me look at the `removeTransactionApprover` controller endpoint and its authorization guards more carefully.
