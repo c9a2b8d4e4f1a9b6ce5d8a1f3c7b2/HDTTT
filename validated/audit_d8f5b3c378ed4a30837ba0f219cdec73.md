@@ -1,0 +1,1 @@
+Looking at the authorization patterns in this codebase, specifically the `removeTransactionApprover` flow in the approvers controller and service.
