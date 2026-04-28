@@ -20,6 +20,7 @@ automation_pending
 /scope_questions_pending/*
 
 _audited/
+_validated/
 __pycache__/
 *.py[cod]
 *$py.class
