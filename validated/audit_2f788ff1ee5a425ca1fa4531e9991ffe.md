@@ -1,0 +1,154 @@
+The code is confirmed. All three claims check out against the actual source. Here is the audit report:
+
+---
+
+Audit Report
+
+## Title
+`COUNCIL_ACCOUNTS` Membership Check Always Returns False — Admin Key Bypass for Council-Initiated `NodeDeleteTransaction` Is Completely Ineffective
+
+## Summary
+
+`COUNCIL_ACCOUNTS` is declared as a JavaScript **array**, but every membership check uses the `in` operator, which tests for **index keys** (`'0'`, `'1'`, `'2'`), not element values. As a result, `isCouncilAccount` is always `false` for every real council account ID. The admin key is unconditionally required for every `NodeDeleteTransaction`, including those legitimately initiated by council accounts. The unit tests that are supposed to validate this protection are broken in the same way, providing false confidence.
+
+## Finding Description
+
+**Root cause — wrong operator on wrong data structure**
+
+`COUNCIL_ACCOUNTS` is declared as an array in both the back-end and front-end:
+
+- `back-end/libs/common/src/constants/index.ts` line 12: `COUNCIL_ACCOUNTS = ['0.0.2', '0.0.50', '0.0.55']`
+- `front-end/src/renderer/utils/transactionSignatureModels/index.ts` line 23: same declaration [1](#0-0) [2](#0-1) 
+
+The membership check in the back-end model uses `in`:
+
+```ts
+const isCouncilAccount = payerId.toString() in COUNCIL_ACCOUNTS;
+``` [3](#0-2) 
+
+The same broken pattern appears in the back-end service:
+
+```ts
+const isCouncilAccount = payerId && payerId.toString() in COUNCIL_ACCOUNTS;
+``` [4](#0-3) 
+
+And identically in the front-end model: [5](#0-4) 
+
+In JavaScript/TypeScript, `value in array` checks whether `value` is a **property name** of the array object — i.e., a numeric index string (`'0'`, `'1'`, `'2'`) or `'length'`. It never checks element values. Therefore:
+
+```
+'0.0.2'  in ['0.0.2', '0.0.50', '0.0.55']  // → false
+'0.0.50' in ['0.0.2', '0.0.50', '0.0.55']  // → false
+'0.0.55' in ['0.0.2', '0.0.50', '0.0.55']  // → false
+```
+
+`isCouncilAccount` is **always `false`**, so the guard branch that skips the admin key requirement is **never entered**.
+
+**Consequence in the back-end service**
+
+Because `isCouncilAccount` is always `false`, `signatureKey.push(nodeInfo.admin_key)` is always executed for `NodeDeleteTransaction`, regardless of who the fee payer is: [6](#0-5) 
+
+**The tests give false confidence**
+
+Both test files use `Object.keys(COUNCIL_ACCOUNTS)[0]` to obtain a "council account ID": [7](#0-6) [8](#0-7) 
+
+`Object.keys` on an array returns its **index strings** (`['0', '1', '2']`), so `Object.keys(COUNCIL_ACCOUNTS)[0]` yields `'0'`, not `'0.0.2'`. The expression `'0' in ['0.0.2', '0.0.50', '0.0.55']` evaluates to `true` because `'0'` is a valid array index — so the tests pass while testing a completely meaningless input. The actual council account IDs (`'0.0.2'`, `'0.0.50'`, `'0.0.55'`) are never tested.
+
+## Impact Explanation
+
+The intended design is: when a privileged council account (`0.0.2`, `0.0.50`, `0.0.55`) is the fee payer of a `NodeDeleteTransaction`, its signature already satisfies the authorization requirement and the node admin key is not needed. Because the check is always `false`:
+
+1. **Governance operation lock**: Any council-initiated `NodeDeleteTransaction` submitted through the tool is permanently stuck in "waiting for signatures" unless the admin key holder co-signs. If the admin key holder is unavailable or adversarial, the operation cannot complete through the tool.
+2. **Unintended veto power**: The admin key holder gains de-facto veto power over council node deletions — a privilege the design explicitly intended to exclude.
+3. **Integrity failure in the trust model**: The tool's computed required-signature set diverges from what the Hedera network actually requires, breaking the correctness guarantee of the signature workflow.
+
+## Likelihood Explanation
+
+Every `NodeDeleteTransaction` where the fee payer is a council account triggers this bug — there are no preconditions to satisfy. The broken tests mean the defect has survived code review and CI. Any organization using the tool for council-governed node management will encounter this on the first such transaction.
+
+## Recommendation
+
+**Option 1 — Change the data structure to a `Set`:**
+```ts
+export const COUNCIL_ACCOUNTS = new Set(['0.0.2', '0.0.50', '0.0.55']);
+// check becomes:
+const isCouncilAccount = COUNCIL_ACCOUNTS.has(payerId.toString());
+```
+
+**Option 2 — Keep the array, use `.includes()`:**
+```ts
+const isCouncilAccount = COUNCIL_ACCOUNTS.includes(payerId.toString());
+```
+
+Both fixes must be applied in all three locations:
+- `back-end/libs/common/src/constants/index.ts`
+- `back-end/libs/common/src/transaction-signature/model/node-delete-transaction.model.ts`
+- `back-end/libs/common/src/transaction-signature/transaction-signature.service.ts`
+- `front-end/src/renderer/utils/transactionSignatureModels/index.ts`
+- `front-end/src/renderer/utils/transactionSignatureModels/node-delete-transaction.model.ts`
+
+The unit tests must also be corrected to use actual council account ID strings (`'0.0.2'`, `'0.0.50'`, `'0.0.55'`) rather than `Object.keys(COUNCIL_ACCOUNTS)[0]`.
+
+## Proof of Concept
+
+```ts
+const COUNCIL_ACCOUNTS = ['0.0.2', '0.0.50', '0.0.55'];
+
+// Broken checks — all return false
+console.log('0.0.2'  in COUNCIL_ACCOUNTS); // false
+console.log('0.0.50' in COUNCIL_ACCOUNTS); // false
+console.log('0.0.55' in COUNCIL_ACCOUNTS); // false
+
+// What the test actually checks — returns true (index key, not value)
+console.log(Object.keys(COUNCIL_ACCOUNTS)[0]); // '0'
+console.log('0' in COUNCIL_ACCOUNTS);           // true ← test passes for wrong reason
+
+// Correct check
+console.log(COUNCIL_ACCOUNTS.includes('0.0.2')); // true
+```
+
+### Citations
+
+**File:** back-end/libs/common/src/constants/index.ts (L12-12)
+```typescript
+export const COUNCIL_ACCOUNTS = ['0.0.2', '0.0.50', '0.0.55'];
+```
+
+**File:** front-end/src/renderer/utils/transactionSignatureModels/index.ts (L23-23)
+```typescript
+export const COUNCIL_ACCOUNTS = ['0.0.2', '0.0.50', '0.0.55'];
+```
+
+**File:** back-end/libs/common/src/transaction-signature/model/node-delete-transaction.model.ts (L18-18)
+```typescript
+    const isCouncilAccount = payerId.toString() in COUNCIL_ACCOUNTS;
+```
+
+**File:** back-end/libs/common/src/transaction-signature/transaction-signature.service.ts (L199-200)
+```typescript
+        const payerId = sdkTransaction.transactionId?.accountId;
+        const isCouncilAccount = payerId && payerId.toString() in COUNCIL_ACCOUNTS;
+```
+
+**File:** back-end/libs/common/src/transaction-signature/transaction-signature.service.ts (L202-204)
+```typescript
+        if (!isCouncilAccount) {
+          signatureKey.push(nodeInfo.admin_key);
+        }
+```
+
+**File:** front-end/src/renderer/utils/transactionSignatureModels/node-delete-transaction.model.ts (L21-22)
+```typescript
+    const payerId = this.transaction.transactionId?.accountId;
+    const isCouncilAccount = payerId && payerId.toString() in COUNCIL_ACCOUNTS;
+```
+
+**File:** back-end/libs/common/src/transaction-signature/model/node-delete-transaction.model.spec.ts (L23-23)
+```typescript
+    const councilAccountId = Object.keys(COUNCIL_ACCOUNTS)[0];
+```
+
+**File:** back-end/libs/common/src/transaction-signature/transaction-signature.service.spec.ts (L430-430)
+```typescript
+      const councilAccountId = Object.keys(COUNCIL_ACCOUNTS)[0];
+```
