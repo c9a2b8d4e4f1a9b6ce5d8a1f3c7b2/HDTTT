@@ -1,0 +1,1 @@
+Looking at the codebase, I need to find an analog to the "missing secondary state update alongside a primary operation" pattern. Let me examine the two signature-upload paths and the `processTransactionStatus` call chain.
